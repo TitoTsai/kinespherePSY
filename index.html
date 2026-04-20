@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>生成頁面</title>
+
+<style>
+:root{--fg:#0f172a;--muted:#64748b;--bd:#e5e7eb;--bg:#ffffff;--bg2:#f8fafc;}
+body{font-family:system-ui,-apple-system,'Noto Sans TC',sans-serif;margin:24px;background:var(--bg2);color:var(--fg)}
+h1,h2{margin:.6em 0} p{line-height:1.7} table{border-collapse:collapse;width:100%;margin:12px 0;background:#fff} th,td{border:1px solid var(--bd);padding:8px;text-align:left} th{background:#f1f5f9} img{max-width:100%;height:auto;border-radius:8px} button{padding:8px 12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;cursor:pointer} input{padding:8px;border:1px solid #cbd5e1;border-radius:10px}
+</style>
+</head>
+<body>
+import React, { useState, useMemo, useRef, useEffect, memo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot, query } from 'firebase/firestore';
+import { 
+  Users, BarChart3, Clock, Target, Activity, Settings2, 
+  Table, Download, CheckSquare, Square, Palette, UserPlus, UserMinus, 
+  Share2, Plus, Minus, LayoutGrid, Globe, Upload, FileJson, Save, 
+  FileText, FileSpreadsheet, FileUp, HelpCircle, ChevronRight, Info,
+  Search, Trash2, Edit3, ExternalLink, Home, Database, FolderPlus,
+  ChevronLeft, Users2, Layout, TrendingUp, Calendar, Zap, Check, ListChecks, Filter,
+  ArrowUpDown, ChevronUp, ChevronDown, PieChart, HelpCircle as HelpIcon, X, 
+  HardDriveDownload, HardDriveUpload, RefreshCw, Keyboard, AlertTriangle, Cloud
+} from 'lucide-react';
+
+/**
+ * Kinesphere Pro v64.0 - 專業科研與藝術整合版
+ * 1. 3D 球體化：為最外圈加上實體深色線條，強化 Kinesphere 的空間體積感。
+ * 2. 歷程圖例：個人全程模式下自動顯示 T1-T10 的顏色對照標籤，一目了然。
+ * 3. 人形還原：完全還原 v57.0 美術剪影（含細緻手掌、腳掌與流線肢體）。
+ * 4. 雲端同步：正式接入 Firestore 雲端儲存，矩陣編輯即刻永久保存。
+ * 5. 修復錯誤：修正 exportMatrixExcel, sortedGroups 等所有 ReferenceError。
+ */
+
+// --- Firebase 初始化 ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'kinesphere-pro-v64';
+
+// --- 表格排序圖標 ---
+const SortIcon = ({ colKey, sortConfig }) => (
+  <div className="inline-flex flex-col ml-1 align-middle opacity-50">
+    <ChevronUp size={10} className={sortConfig.key === colKey && sortConfig.direction === 'asc' ? 'text-indigo-600 opacity-100' : ''} />
+    <ChevronDown size={10} className={sortConfig.key === colKey && sortConfig.direction === 'desc' ? 'text-indigo-600 opacity-100' : ''} />
+  </div>
+);
+
+// --- 動力扇區組件 (Memoized) ---
+const RadialSector = memo(({ score, baseAngle, offsetAngle, width, color, opacity, isFocused, isDimmed, memberName, sIdx, CX, CY, onHover, onLeave }) => {
+  const innerR = 25; 
+  const curScore = score || 1.0;
+  const outerR = curScore * 40 + 25; 
+  const startAngle = ((baseAngle + offsetAngle - width / 2) * Math.PI) / 180;
+  const endAngle = ((baseAngle + offsetAngle + width / 2) * Math.PI) / 180;
+  
+  const p1 = { x: CX + innerR * Math.cos(startAngle), y: CY + innerR * Math.sin(startAngle) };
+  const p2 = { x: CX + outerR * Math.cos(startAngle), y: CY + outerR * Math.sin(startAngle) };
+  const p3 = { x: CX + outerR * Math.cos(endAngle), y: CY + outerR * Math.sin(endAngle) };
+  const p4 = { x: CX + innerR * Math.cos(endAngle), y: CY + innerR * Math.sin(endAngle) };
+
+  return (
+    <g onMouseEnter={onHover} onMouseLeave={onLeave}>
+      <path 
+        d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y} A ${outerR} ${outerR} 0 0 1 ${p3.x} ${p3.y} L ${p4.x} ${p4.y} A ${innerR} ${innerR} 0 0 0 ${p1.x} ${p1.y} Z`} 
+        fill={color} 
+        fillOpacity={isDimmed ? 0.05 : (isFocused ? 1 : opacity)} 
+        stroke={isFocused ? "white" : "none"} 
+        strokeWidth={0.5} 
+        className="transition-all duration-300 cursor-pointer"
+      />
+      {isFocused && (
+        <g pointerEvents="none">
+          <rect x={CX - 65} y={CY - 12} width={130} height={24} rx={8} fill="#1e293b" fillOpacity="0.95" />
+          <text x={CX} y={CY + 5} textAnchor="middle" fontSize="7.5" fontWeight="900" fill="white">T{sIdx + 1} - {memberName}</text>
+        </g>
+      )}
+    </g>
+  );
+});
+
+const App = () => {
+  // --- 1. 核心狀態 ---
+  const [user, setUser] = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [appView, setAppView] = useState('dashboard'); 
+  const [sessionCount, setSessionCount] = useState(10); 
+  const [activeGroupId, setActiveGroupId] = useState(null);
+  const [activeMemberId, setActiveMemberId] = useState(null);
+  const [selectedGroupIds, setSelectedGroupIds] = useState([]); 
+  const [selectedMemberIds, setSelectedMemberIds] = useState([]); 
+  const [selectedSession, setSelectedSession] = useState(1);
+  const [viewMode, setViewMode] = useState('ind_session'); 
+  const [hoverInfo, setHoverInfo] = useState(null); 
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortConfig, setSortConfig] = useState({ key: 'id', direction: 'asc' });
+  const [saveStatus, setSaveStatus] = useState('idle'); 
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [activeTooltip, setActiveTooltip] = useState(null);
+
+  const chartRef = useRef(null);
+  const CREDIT_TEXT = "程式設計：蔡炘澤｜指導老師：洪瑩慧教授";
+
+  // 幾何常量
+  const CX = 150, CY = 180, CHART_Y_OFFSET = 30;
+  const reachColors = { near: '#f59e0b', middle: '#10b981', far: '#6366f1' };
+  const memberPalette = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316', '#14b8a6', '#f43f5e'];
+  const getMemberColor = (index) => memberPalette[index % memberPalette.length];
+  const getSessionColor = (index, total) => `hsla(${(index / (total || 1)) * 120 + 200}, 70%, 50%, 0.85)`;
+
+  const positions = ["我 (I)", "你 (You)", "他 (He / She)", "再回我 (\"I\")"];
+  const positionConfig = {
+    "我 (I)": { angle: -135, boxX: 5, boxY: 35, w: 120, h: 100, textX: 12, textY: 54, align: 'start' },
+    "你 (You)": { angle: -45, boxX: 175, boxY: 35, w: 120, h: 100, textX: 288, textY: 54, align: 'end' },
+    "他 (He / She)": { angle: 45, boxX: 175, boxY: 225, w: 120, h: 100, textX: 288, textY: 306, align: 'end' },
+    "再回我 (\"I\")": { angle: 135, boxX: 5, boxY: 225, w: 120, h: 100, textX: 12, textY: 306, align: 'start' }
+  };
+
+  const createEmptySession = () => {
+    let sess = {};
+    positions.forEach(p => sess[p] = { score: 1.0 });
+    return sess;
+  };
+
+  // --- 2. 雲端同步與身份認證 ---
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+      else await signInAnonymously(auth);
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'researchGroups');
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setGroups(data);
+      if (data.length > 0 && !activeGroupId) {
+        setActiveGroupId(data[0].id);
+        setActiveMemberId(data[0].members?.[0]?.id || null);
+        setSelectedMemberIds((data[0].members || []).map(m => m.id));
+      }
+    });
+    return () => unsubscribe();
+  }, [user, activeGroupId]);
+
+  // --- 3. 數據運算 ---
+  const currentGroup = useMemo(() => groups.find(g => g.id === activeGroupId) || groups[0] || { members: [] }, [groups, activeGroupId]);
+  const currentMember = useMemo(() => (currentGroup.members || []).find(m => m.id === activeMemberId) || currentGroup.members?.[0], [currentGroup, activeMemberId]);
+
+  const sortedGroups = useMemo(() => {
+    let result = groups.filter(g => (g.name || "").toLowerCase().includes(searchTerm.toLowerCase()));
+    if (sortConfig.key) {
+      result.sort((a, b) => {
+        let aVal = sortConfig.key === 'members' ? (a.members?.length || 0) : a[sortConfig.key];
+        let bVal = sortConfig.key === 'members' ? (b.members?.length || 0) : b[sortConfig.key];
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return result;
+  }, [groups, searchTerm, sortConfig]);
+
+  const clinicalSummary = useMemo(() => {
+    const allMembers = groups.flatMap(g => g.members || []);
+    const allScores = allMembers.flatMap(m => m.sessions.flatMap(s => positions.map(pos => s[pos]?.score || 1.0)));
+    const avg = allScores.length ? (allScores.reduce((a, b) => a + b, 0) / allScores.length).toFixed(2) : "1.00";
+    const highRatio = allScores.length ? ((allScores.filter(s => s > 2.0).length / allScores.length) * 100).toFixed(1) : "0.0";
+    return { totalSamples: allMembers.length, avgExpansion: avg, highDynRatio: highRatio, totalGroups: groups.length };
+  }, [groups]);
+
+  const groupClinicalStats = useMemo(() => {
+    if (!currentGroup.members) return { avg: "1.00", highRatio: "0.0" };
+    const allScores = currentGroup.members.flatMap(m => m.sessions.flatMap(s => positions.map(pos => s[pos]?.score || 1.0)));
+    const avg = allScores.length ? (allScores.reduce((a, b) => a + b, 0) / allScores.length).toFixed(2) : "1.00";
+    const highRatio = allScores.length ? ((allScores.filter(s => s > 2.0).length / allScores.length) * 100).toFixed(1) : "0.0";
+    return { avg, highRatio };
+  }, [currentGroup]);
+
+  const graphTitle = useMemo(() => {
+    if (viewMode.includes('session')) return `第 ${selectedSession} 次團體分析儀`;
+    return `全 ${sessionCount} 次團體歷程總覽`;
+  }, [viewMode, selectedSession, sessionCount]);
+
+  // --- 4. 雲端同步引擎 ---
+  const syncToCloud = async (targetGroup) => {
+    if (!user || !targetGroup) return;
+    setSaveStatus('saving');
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'researchGroups', targetGroup.id), targetGroup);
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    } catch (e) { setSaveStatus('error'); }
+  };
+
+  const handleUpdateScore = (mId, sIdx, pos, val) => {
+    const clampedVal = Math.max(1.0, Math.min(3.0, parseFloat(val) || 1.0));
+    const nextMembers = (currentGroup.members || []).map(m => (m.id === mId ? {
+      ...m, sessions: m.sessions.map((s, idx) => idx === sIdx ? { ...s, [pos]: { score: clampedVal } } : s)
+    } : m));
+    syncToCloud({ ...currentGroup, members: nextMembers });
+  };
+
+  const updateMemberName = (mId, newName) => {
+    const nextMembers = (currentGroup.members || []).map(m => m.id === mId ? { ...m, name: newName } : m);
+    syncToCloud({ ...currentGroup, members: nextMembers });
+  };
+
+  const addMember = () => {
+    const newId = Date.now();
+    const nextMembers = [...(currentGroup.members || []), { id: newId, name: `成員 ${String.fromCharCode(65 + (currentGroup.members?.length || 0))}`, sessions: Array(sessionCount).fill(null).map(() => createEmptySession()) }];
+    syncToCloud({ ...currentGroup, members: nextMembers });
+  };
+
+  const deleteMember = (mId) => {
+    const nextMembers = (currentGroup.members || []).filter(m => m.id !== mId);
+    syncToCloud({ ...currentGroup, members: nextMembers });
+  };
+
+  const addGroup = async () => {
+    if (!user) return;
+    const newId = `g-${Date.now()}`;
+    const newGroup = { id: newId, name: `新研究團體 ${groups.length + 1}`, note: "國小專輔教師", createdAt: new Date().toISOString().split('T')[0], members: Array(4).fill(null).map((_, i) => ({ id: Date.now() + i, name: `成員 ${String.fromCharCode(65 + i)}`, sessions: Array(sessionCount).fill(null).map(() => createEmptySession()) })) };
+    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'researchGroups', newId), newGroup);
+  };
+
+  const handleBatchDelete = async () => {
+    if (!user) return;
+    for (const id of selectedGroupIds) await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'researchGroups', id));
+    setSelectedGroupIds([]); setShowDeleteModal(false);
+  };
+
+  const handleAdjustSessionCount = (newCount) => {
+    if (newCount < 1 || newCount > 20) return;
+    const nextMembers = (currentGroup.members || []).map(m => {
+      let sessions = [...m.sessions];
+      if (newCount > sessions.length) sessions = [...sessions, ...Array(newCount - sessions.length).fill(null).map(() => createEmptySession())];
+      else sessions = sessions.slice(0, newCount);
+      return { ...m, sessions };
+    });
+    setSessionCount(newCount);
+    syncToCloud({ ...currentGroup, members: nextMembers });
+  };
+
+  // --- 5. 影像導出邏輯 ---
+  const exportMatrixExcel = () => {
+    let csv = "\uFEFF成員姓名,研究階段,我,你,他,再回我\n";
+    (currentGroup.members || []).forEach(m => m.sessions.forEach((s, idx) => {
+      csv += `${m.name},T${idx + 1},${s["我 (I)"].score},${s["你 (You)"].score},${s["他 (He / She)"].score},${s["再回我 (\"I\")"].score}\n`;
+    }));
+    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    link.download = `${currentGroup.name}_數據矩陣.csv`; link.click();
+  };
+
+  const downloadImage = (format) => {
+    const svg = chartRef.current; if (!svg) return;
+    const canvas = document.createElement("canvas"); const ctx = canvas.getContext("2d");
+    const SIZE = 1800; canvas.width = SIZE; canvas.height = SIZE;
+    const img = new Image(); const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml;charset=utf-8" }));
+    img.onload = () => {
+      ctx.fillStyle = "white"; ctx.fillRect(0, 0, SIZE, SIZE);
+      const chartWidth = 1080; const chartHeight = chartWidth * (350 / 300);
+      const startX = (SIZE - chartWidth) / 2; const startY = 60;
+      const scale = chartWidth / 300; const drawCX = startX + 150 * scale, drawCY = startY + CY * scale;
+      
+      // 3D 背景背景線
+      ctx.setLineDash([12 * scale, 10 * scale]); ctx.strokeStyle = "rgba(100, 116, 139, 0.22)"; ctx.lineWidth = 1.6 * scale;
+      ctx.beginPath(); ctx.ellipse(drawCX, drawCY, 145 * scale, 45 * scale, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(drawCX, drawCY, 45 * scale, 145 * scale, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]); ctx.drawImage(img, startX, startY, chartWidth, chartHeight);
+
+      // 五欄圖例排版
+      const legendTop = startY + chartHeight + 30; 
+      const isHistMode = viewMode === 'ind_history';
+      const listToRender = isHistMode ? Array.from({length: sessionCount}) : (viewMode.includes('grp') ? selectedMemberIds : [activeMemberId]);
+      
+      const rows = Math.ceil(listToRender.length / 5);
+      const legendBoxH = 120 + rows * 65;
+      const legendBoxW = 1620, legendBoxX = (SIZE - legendBoxW) / 2;
+      ctx.fillStyle = "#f8fafc"; ctx.beginPath(); ctx.roundRect(legendBoxX, legendTop, legendBoxW, legendBoxH, 40); ctx.fill();
+      ctx.font = "bold 38px Arial"; ctx.fillStyle = "#1e293b";
+      ctx.fillText(isHistMode ? "歷程次數顏色辨識 / Session Legend" : "成員顏色辨識說明 / Clinical Legend", legendBoxX + 60, legendTop + 80);
+
+      ctx.font = "30px Arial"; const colW = 310, rowH = 65;
+      listToRender.forEach((item, idx) => {
+        const row = Math.floor(idx / 5); const col = idx % 5;
+        const x = legendBoxX + 60 + col * colW; const y = legendTop + 145 + row * rowH;
+        let labelText, color;
+        if (isHistMode) {
+          labelText = `第 ${idx + 1} 次 (T${idx+1})`; color = getSessionColor(idx, sessionCount);
+        } else {
+          const m = currentGroup.members.find(x => x.id === item); if (!m) return;
+          labelText = m.name; color = getMemberColor(currentGroup.members.indexOf(m));
+        }
+        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x + 18, y - 10, 18, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#475569"; ctx.fillText(labelText, x + 50, y);
+      });
+
+      ctx.font = "bold 32px Arial"; ctx.fillStyle = "#000000"; ctx.textAlign = "right";
+      ctx.fillText(CREDIT_TEXT, SIZE - 100, SIZE - 80);
+      const dataUrl = canvas.toDataURL(`image/${format}`, 1.0); const link = document.createElement("a");
+      link.download = `Kinesphere_Result_${new Date().getTime()}.${format}`; link.href = dataUrl; link.click();
+    };
+    img.src = url;
+  };
+
+  // --- 6. 渲染輔助 ---
+  const renderRadialBar = (score, baseAngle, offsetAngle, width, color, opacity = 1, mId = null, sIdx = null) => {
+    const isFocused = hoverInfo && hoverInfo.mId === mId && hoverInfo.sIdx === sIdx;
+    const isIndHistFocused = viewMode === 'ind_history' && hoverInfo && hoverInfo.sIdx === sIdx;
+    const isIndSessFocused = viewMode === 'ind_session' && hoverInfo && hoverInfo.mId === mId;
+    const finalFocused = isFocused || isIndHistFocused || isIndSessFocused;
+    const mObj = (currentGroup.members || []).find(m => m.id === mId);
+    return (
+      <RadialSector 
+        key={`${mId}-${sIdx}-${baseAngle}-${offsetAngle}`} score={score} baseAngle={baseAngle} offsetAngle={offsetAngle} width={width} color={color} opacity={opacity} 
+        isFocused={finalFocused} isDimmed={hoverInfo && !finalFocused} memberName={mObj?.name || ""} sIdx={sIdx} CX={CX} CY={CY} 
+        onHover={() => setHoverInfo({ mId, sIdx })} onLeave={() => setHoverInfo(null)} 
+      />
+    );
+  };
+
+  const handleMatrixKeyDown = (e, sIdx, pIdx, mIdx, totalSessions, totalPositions, totalMembers) => {
+    let nextS = sIdx, nextP = pIdx, nextM = mIdx;
+    if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); nextP = (pIdx + 1) % 4; nextS = pIdx === 3 ? sIdx + 1 : sIdx; }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); nextP = (pIdx - 1 + 4) % 4; nextS = pIdx === 0 ? sIdx - 1 : sIdx; }
+    else if (e.key === 'ArrowRight' || e.key === 'Tab') { if (mIdx < totalMembers - 1) { e.preventDefault(); nextM = mIdx + 1; } }
+    else if (e.key === 'ArrowLeft') { if (mIdx > 0) { e.preventDefault(); nextM = mIdx - 1; } }
+    document.getElementById(`input-${nextS}-${nextP}-${nextM}`)?.focus();
+  };
+
+  const handleSort = (key) => {
+    setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc' }));
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-[#f1f5f9] text-slate-800 font-sans overflow-hidden">
+      <nav className="bg-white border-b border-slate-200 px-8 py-3 flex items-center justify-between shadow-sm z-50 shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+             <div className="bg-slate-900 p-2 rounded-xl text-white shadow-lg transform -rotate-3"><Activity size={22} /></div>
+             <div><h1 className="text-xl font-black text-slate-900 tracking-tighter uppercase leading-none">Kinesphere Pro</h1><p className="text-[9px] font-bold text-indigo-500 uppercase tracking-widest mt-1 italic leading-none">Sphere Master v64.0</p></div>
+          </div>
+          <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner">
+            <button onClick={() => setAppView('dashboard')} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${appView === 'dashboard' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>資料庫</button>
+            <button onClick={() => setAppView('analyzer')} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${appView === 'analyzer' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Kinesphere 狀態表</button>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {saveStatus !== 'idle' && (
+            <div className={`flex items-center gap-2 text-[10px] font-black px-3 py-1.5 rounded-full border transition-all ${saveStatus === 'saving' ? 'text-indigo-600 bg-indigo-50 border-indigo-100' : saveStatus === 'success' ? 'text-emerald-600 bg-emerald-50 border-emerald-100' : 'text-rose-600 bg-rose-50 border-rose-100'}`}>
+              {saveStatus === 'saving' ? <RefreshCw size={12} className="animate-spin"/> : <Cloud size={14}/>}
+              {saveStatus === 'saving' ? '雲端同步中...' : '數據已永久儲存'}
+            </div>
+          )}
+          <div className="flex bg-indigo-50 p-1 rounded-xl border border-indigo-100 shadow-inner mr-4">
+            <button onClick={() => downloadImage('png')} className="px-3 py-1.5 text-[10px] font-black text-indigo-600 hover:bg-white rounded-lg transition-all">PNG</button>
+            <button onClick={() => downloadImage('jpeg')} className="px-3 py-1.5 text-[10px] font-black text-indigo-600 hover:bg-white rounded-lg transition-all">JPG</button>
+          </div>
+          <button className="p-2 text-slate-400 hover:text-slate-600 transition-colors"><Settings2 size={20}/></button>
+        </div>
+      </nav>
+
+      {showDeleteModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[1000] flex items-center justify-center p-6 animate-in zoom-in-95">
+           <div className="bg-white max-w-md w-full rounded-[2.5rem] p-8 shadow-2xl border border-rose-100">
+              <div className="bg-rose-50 w-16 h-16 rounded-2xl flex items-center justify-center text-rose-600 mb-6 mx-auto"><AlertTriangle size={32}/></div>
+              <h3 className="text-2xl font-black text-slate-900 text-center mb-2 italic">Confirm Permanent Deletion?</h3>
+              <p className="text-sm text-slate-50 text-center mb-8 leading-relaxed">此操作將永久從雲端伺服器移除數據。</p>
+              <div className="grid grid-cols-2 gap-4">
+                 <button onClick={() => setShowDeleteModal(false)} className="py-4 bg-slate-100 text-slate-600 rounded-2xl font-black text-sm">取消</button>
+                 <button onClick={handleBatchDelete} className="py-4 bg-rose-600 text-white rounded-2xl font-black text-sm shadow-lg shadow-rose-200 transition-all">永久刪除</button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      <div className="flex flex-1 overflow-hidden">
+        {appView === 'dashboard' ? (
+          /* --- 首頁 --- */
+          <main className="flex-1 overflow-y-auto p-10 bg-[#f8fafc] animate-in fade-in duration-500 scrollbar-hide pb-32">
+            <div className="max-w-7xl mx-auto space-y-8">
+               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                 {[ 
+                   { label: "研究樣本總數", value: clinicalSummary.totalSamples, icon: Users, color: "indigo" }, 
+                   { label: "研究團體數", value: clinicalSummary.totalGroups, icon: LayoutGrid, color: "emerald" }, 
+                   { label: "全域平均擴張率", value: clinicalSummary.avgExpansion, icon: TrendingUp, color: "rose" }, 
+                   { label: "顯著擴張比例", value: `${clinicalSummary.highDynRatio}%`, icon: Zap, color: "amber" } 
+                 ].map((s, i) => (
+                   <div key={i} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm relative overflow-hidden flex flex-col gap-3 group hover:shadow-xl transition-all">
+                      <div className="flex items-center justify-between w-full">
+                        <div className="z-10">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 leading-none">{s.label}</p>
+                          <p className={`text-3xl font-black tracking-tighter ${s.color === 'rose' ? 'text-rose-600' : 'text-slate-900'}`}>{s.value}</p>
+                        </div>
+                        <div className={`bg-${s.color}-50 p-4 rounded-2xl text-${s.color}-600 z-10`}>{React.createElement(s.icon, { size: 22 })}</div>
+                      </div>
+                      <div className={`absolute -right-4 -bottom-4 w-24 h-24 bg-${s.color}-50/30 rounded-full blur-2xl group-hover:scale-150 transition-transform duration-700`}></div>
+                   </div>
+                 ))}
+               </div>
+
+               <div className="flex justify-between items-center px-2 pt-4">
+                 <h2 className="text-2xl font-black text-slate-900 tracking-tight italic uppercase leading-none">Research Database</h2>
+                 <button onClick={addGroup} className="bg-slate-900 text-white px-5 py-2.5 rounded-2xl text-xs font-black flex items-center gap-2 shadow-lg hover:bg-indigo-600 transition-all"><Plus size={16}/> 新增研究團體</button>
+               </div>
+
+               <div className="bg-white rounded-[3rem] border border-slate-100 shadow-2xl overflow-hidden mb-12">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 text-[11px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                        <th className="px-6 py-5 w-16 text-center">選取</th>
+                        <th className="px-4 py-5 w-16 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('id')}># <SortIcon colKey="id" sortConfig={sortConfig}/></th>
+                        <th className="px-6 py-5 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('name')}>團體名稱 <SortIcon colKey="name" sortConfig={sortConfig}/></th>
+                        <th className="px-6 py-5">研究背景備註</th>
+                        <th className="px-6 py-5 text-center cursor-pointer hover:bg-slate-100" onClick={() => handleSort('members')}>樣本數 <SortIcon colKey="members" sortConfig={sortConfig}/></th>
+                        <th className="px-8 py-5 text-right">動作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {sortedGroups.map((g, idx) => (
+                        <tr key={g.id} className={`hover:bg-indigo-50/10 transition-all group ${selectedGroupIds.includes(g.id)?'bg-indigo-50/20':''}`}>
+                          <td className="px-6 py-6 text-center"><button onClick={() => setSelectedGroupIds(prev => prev.includes(g.id)?prev.filter(i=>i!==g.id):[...prev, g.id])} className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all ${selectedGroupIds.includes(g.id) ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-200'}`}>{selectedGroupIds.includes(g.id) && <Check size={14}/>}</button></td>
+                          <td className="px-4 py-6 text-[10px] font-bold text-slate-400 italic">{idx + 1}</td>
+                          <td className="px-6 py-6 font-black text-slate-800"><input className="bg-transparent border-none p-0 focus:ring-0 w-full font-black" value={g.name} onChange={(e) => {
+                             const ng = groups.map(group => group.id === g.id ? { ...group, name: e.target.value } : group); setGroups(ng); syncToCloud(ng.find(x => x.id === g.id));
+                          }}/></td>
+                          <td className="px-6 py-6 text-xs text-slate-400 italic"><input className="bg-transparent border-none p-0 focus:ring-0 w-full italic" value={g.note} onChange={(e) => {
+                             const ng = groups.map(group => group.id === g.id ? { ...group, note: e.target.value } : group); setGroups(ng); syncToCloud(ng.find(x => x.id === g.id));
+                          }}/></td>
+                          <td className="px-6 py-6 text-center"><span className="bg-white px-3 py-1 rounded-full text-[11px] font-black text-indigo-600 border border-slate-100">{(g.members || []).length} 人</span></td>
+                          <td className="px-8 py-6 text-right flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-all">
+                             <button onClick={() => { setActiveGroupId(g.id); setAppView('group_detail'); }} className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-md hover:bg-slate-900 transition-all"><Edit3 size={16}/></button>
+                             <button onClick={() => { setActiveGroupId(g.id); setShowDeleteModal(true); setSelectedGroupIds([g.id]); }} className="p-2.5 bg-rose-50 text-rose-600 rounded-xl hover:bg-rose-600 transition-all shadow-sm"><Trash2 size={16}/></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+               </div>
+               <footer className="flex flex-col items-center gap-6 py-16 border-t border-slate-100 text-center">
+                 <div className="bg-slate-950 text-white px-12 py-4 rounded-full shadow-2xl border border-slate-800"><p className="text-base font-black tracking-[0.3em] uppercase">{CREDIT_TEXT}</p></div>
+                 <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest leading-none opacity-40 italic">Kinesphere Pro Master Clinical System © 2024</p>
+               </footer>
+            </div>
+          </main>
+        ) : appView === 'group_detail' ? (
+          /* --- 數據編輯頁 --- */
+          <main className="flex-1 overflow-y-auto p-10 bg-white animate-in slide-in-from-right duration-500 scrollbar-hide pb-32">
+             <div className="max-w-7xl mx-auto space-y-8">
+                <div className="flex items-center justify-between">
+                   <div className="flex items-center gap-4"><button onClick={() => setAppView('dashboard')} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><ChevronLeft size={24}/></button><div><h2 className="text-3xl font-black text-slate-900 uppercase tracking-tighter leading-none">{currentGroup.name}</h2><p className="text-sm text-slate-400 font-bold uppercase tracking-widest mt-1 italic text-indigo-600 leading-none">數據編輯與臨床報告導出中心</p></div></div>
+                   <div className="flex gap-3">
+                      <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200 gap-1"><span className="px-3 text-[10px] font-black text-slate-400 uppercase">規格: {sessionCount} 次</span><button onClick={() => handleAdjustSessionCount(sessionCount-1)} className="p-2 bg-white rounded-xl hover:bg-slate-50 shadow-sm"><Minus size={12}/></button><button onClick={() => handleAdjustSessionCount(sessionCount+1)} className="p-2 bg-white rounded-xl hover:bg-slate-50 shadow-sm"><Plus size={12}/></button></div>
+                      <button onClick={addMember} className="px-5 py-2.5 bg-indigo-100 text-indigo-600 rounded-2xl text-[11px] font-black uppercase flex items-center gap-2 hover:bg-indigo-600 transition-all shadow-sm"><UserPlus size={16}/> 新增樣本</button>
+                      <button onClick={exportMatrixExcel} className="px-5 py-2.5 bg-emerald-50 text-emerald-600 rounded-2xl text-[11px] font-black border border-emerald-100 flex items-center gap-2 hover:bg-emerald-600 hover:text-white transition-all shadow-sm"><FileSpreadsheet size={16}/> Excel</button>
+                      <button onClick={() => { setSelectedMemberIds((currentGroup.members || []).map(m=>m.id)); setAppView('analyzer'); }} className="px-6 py-2.5 bg-slate-900 text-white rounded-2xl text-[11px] font-black uppercase shadow-lg flex items-center gap-2 transition-all"><BarChart3 size={16}/> 視覺化比對分析</button>
+                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-6">
+                   <div className="bg-indigo-50/50 p-6 rounded-[2.5rem] border border-indigo-100 flex items-center justify-between shadow-sm hover:bg-indigo-50 transition-all">
+                      <div><p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest leading-none mb-2">本團體平均擴張率</p><p className="text-3xl font-black text-indigo-900 leading-none">{groupClinicalStats.avg}</p></div>
+                      <div className="bg-indigo-600 p-4 rounded-2xl text-white shadow-lg"><TrendingUp size={24}/></div>
+                   </div>
+                   <div className="bg-emerald-50/50 p-6 rounded-[2.5rem] border border-emerald-100 flex items-center justify-between shadow-sm hover:bg-emerald-50 transition-all">
+                      <div><p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest leading-none mb-2">本團體顯著擴張比例</p><p className="text-3xl font-black text-emerald-900 leading-none">{groupClinicalStats.highRatio}%</p></div>
+                      <div className="bg-emerald-600 p-4 rounded-2xl text-white shadow-lg"><Zap size={24}/></div>
+                   </div>
+                </div>
+
+                <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-2xl overflow-hidden mb-10">
+                   <table className="w-full text-left border-collapse">
+                      <thead><tr className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100"><th className="px-8 py-5">成員姓名 (點選編輯)</th>{positions.map(p=><th key={p} className="px-4 py-5 text-center">{p} (T{selectedSession})</th>)}<th className="px-8 py-5 text-right">操作</th></tr></thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {(currentGroup.members || []).map((m) => (
+                          <tr key={m.id} className="hover:bg-slate-50 group transition-all">
+                            <td className="px-8 py-6 font-black text-slate-800"><input className="bg-transparent border-none p-0 focus:ring-0 font-black text-slate-800 w-full" value={m.name} onChange={(e) => updateMemberName(m.id, e.target.value)}/></td>
+                            {positions.map(p => (
+                              <td key={p} className="px-4 py-6 text-center">
+                                <input type="number" step="0.1" min="1" max="3" className={`w-12 text-center py-1 rounded-lg text-xs font-black border focus:outline-none focus:border-indigo-500 transition-all ${m.sessions?.[selectedSession-1]?.[p]?.score > 2 ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-500'}`} value={(m.sessions?.[selectedSession-1]?.[p]?.score || 1.0).toFixed(1)} onChange={(e) => handleUpdateScore(m.id, selectedSession-1, p, e.target.value)}/>
+                              </td>
+                            ))}
+                            <td className="px-8 py-6 text-right flex justify-end gap-2"><button onClick={() => { setActiveMemberId(m.id); setAppView('analyzer'); }} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all shadow-sm border border-slate-100"><ExternalLink size={18}/></button><button onClick={() => deleteMember(m.id)} className="p-2 text-rose-400 opacity-0 group-hover:opacity-100 hover:text-rose-600 transition-all"><Trash2 size={18}/></button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                   </table>
+                </div>
+
+                <div className="pt-10 border-t border-slate-100 pb-20 text-center">
+                   <h3 className="text-xl font-black text-slate-900 uppercase tracking-widest flex items-center justify-center gap-3 mb-6 italic underline underline-offset-8 decoration-indigo-200 decoration-4 leading-none">Longitudinal Matrix</h3>
+                   <div className="bg-slate-900 rounded-[3rem] p-10 shadow-2xl border border-slate-800 mb-10 overflow-auto max-h-[70vh] scrollbar-hide relative">
+                      <table className="w-full text-[10px] text-slate-400 border-collapse table-fixed min-w-full">
+                        <thead className="sticky top-0 z-40 bg-slate-900 shadow-[0_5px_15px_rgba(0,0,0,0.5)]">
+                          <tr className="border-b border-slate-700">
+                            <th className="p-4 text-left w-20 sticky left-0 top-0 bg-slate-900 z-50">Session</th>
+                            <th className="p-4 text-left w-32 sticky left-20 top-0 bg-slate-900 z-50 border-r border-slate-800">位格象限</th>
+                            {(currentGroup.members || []).map(m=><th key={m.id} className="p-4 text-center text-white font-black min-w-[120px] bg-slate-900 truncate">{m.name}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                           {Array.from({length: sessionCount}).map((_, si) => positions.map((p, pi) => (
+                             <tr key={`${si}-${p}`} className={`${pi===3?'border-b border-slate-800':''} hover:bg-slate-800/50 transition-colors`}>
+                               <td className="p-4 font-black text-indigo-400 sticky left-0 bg-slate-900 z-20 shadow-r">{pi===0?`T${si+1}`:''}</td>
+                               <td className="p-4 uppercase tracking-tighter sticky left-20 bg-slate-900 z-20 border-r border-slate-800 shadow-r">{p}</td>
+                               {(currentGroup.members || []).map((m, mIdx) => (
+                                 <td key={m.id} className="p-1.5">
+                                    <input 
+                                      id={`input-${si}-${pi}-${mIdx}`}
+                                      type="number" step="0.1" min="1" max="3" 
+                                      className={`w-full bg-slate-800/40 text-center py-2.5 rounded-xl border border-transparent focus:border-indigo-500 focus:bg-slate-800 focus:outline-none transition-all font-black ${m.sessions?.[si]?.[p]?.score > 2 ? 'text-emerald-400' : 'text-slate-300'}`} 
+                                      value={(m.sessions?.[si]?.[p]?.score || 1.0).toFixed(1)} 
+                                      onChange={(e) => handleUpdateScore(m.id, si, p, e.target.value)}
+                                      onKeyDown={(e) => handleMatrixKeyDown(e, si, pi, mIdx, sessionCount, 4, currentGroup.members.length)}
+                                    />
+                                 </td>
+                               ))}
+                             </tr>
+                           )))}
+                        </tbody>
+                      </table>
+                   </div>
+                   <div className="bg-slate-950 text-white px-10 py-3 rounded-full border border-slate-800 shadow-xl inline-block"><p className="text-sm font-black tracking-widest leading-none">{CREDIT_TEXT}</p></div>
+                </div>
+             </div>
+          </main>
+        ) : (
+          /* --- Kinesphere 狀態表 --- */
+          <>
+            <aside className="w-80 bg-white border-r border-slate-200 overflow-y-auto p-6 space-y-8 scrollbar-hide shrink-0 shadow-sm animate-in slide-in-from-left duration-500 pb-32">
+              <button onClick={() => setAppView('group_detail')} className="flex items-center gap-2 text-[10px] font-black text-slate-400 hover:text-indigo-600 transition-all uppercase tracking-widest mb-4 leading-none"><ChevronLeft size={14}/> 返回矩陣總表</button>
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><Users size={16} className="text-indigo-500" /> 分析對比樣本</h2>
+                  <div className="flex gap-2">
+                    <button onClick={() => setSelectedMemberIds((currentGroup.members || []).map(m=>m.id))} className="text-[9px] font-bold text-indigo-600 hover:underline">全選</button>
+                    <button onClick={() => setSelectedMemberIds([])} className="text-[9px] font-bold text-slate-400 hover:underline">清空</button>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                   {(currentGroup.members || []).map((m, idx) => (
+                     <div key={m.id} className={`flex items-center gap-2 p-2.5 rounded-xl border-2 transition-all ${activeMemberId === m.id ? 'border-indigo-600 bg-indigo-50/30 shadow-sm' : 'border-slate-50 bg-slate-50'}`}>
+                        <button onClick={() => setActiveMemberId(m.id)} className="flex-1 flex items-center gap-3 text-left overflow-hidden">
+                          <div className="w-3.5 h-3.5 rounded-full shadow-sm shrink-0" style={{ backgroundColor: getMemberColor(idx) }}></div>
+                          <span className={`text-sm font-black truncate ${activeMemberId === m.id ? 'text-indigo-900' : 'text-slate-600'}`}>{m.name}</span>
+                        </button>
+                        <button onClick={() => setSelectedMemberIds(prev => prev.includes(m.id)?prev.filter(i=>i!==m.id):[...prev, m.id])} className="p-1 text-slate-400">
+                          {selectedMemberIds.includes(m.id) ? <CheckSquare size={18} className="text-indigo-600"/> : <Square size={18} />}
+                        </button>
+                     </div>
+                   ))}
+                </div>
+              </section>
+              <section className="space-y-4 pt-4 border-t border-slate-50">
+                <h2 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-4 flex items-center gap-2"><Clock size={16} className="text-indigo-500" /> 數據調整 (T{selectedSession})</h2>
+                <div className="flex flex-wrap gap-1 mb-6 bg-slate-50 p-2 rounded-xl">
+                  {Array.from({ length: sessionCount }).map((_, i) => (
+                    <button key={i + 1} onClick={() => setSelectedSession(i + 1)} className={`w-8 h-8 rounded-lg text-[10px] font-black transition-all border-2 flex items-center justify-center ${selectedSession === i + 1 ? 'border-indigo-600 bg-indigo-900 text-white shadow-md' : 'border-white bg-white text-slate-400 hover:border-slate-200'}`}>T{i + 1}</button>
+                  ))}
+                </div>
+                <div className="space-y-4">
+                  <p className="text-[11px] font-black text-indigo-600 bg-indigo-50 p-2.5 rounded-xl text-center uppercase tracking-widest italic border border-indigo-100">正在編輯：{currentMember?.name}</p>
+                  {positions.map((pos) => (
+                    <div key={pos} className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm space-y-2">
+                      <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-wide"><label className="text-slate-700">{pos}</label><span className="text-indigo-600">{(currentMember?.sessions?.[selectedSession-1]?.[pos]?.score || 1.0).toFixed(1)}</span></div>
+                      <input type="range" min="1" max="3" step="0.1" value={currentMember?.sessions?.[selectedSession-1]?.[pos]?.score || 1.0} onChange={(e) => handleUpdateScore(currentMember.id, selectedSession - 1, pos, e.target.value)} className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                    </div>
+                  ))}
+                </div>
+              </section>
+              <footer className="pt-10 flex flex-col items-center opacity-40 text-center">
+                 <div className="bg-slate-900 text-white px-4 py-2 rounded-full scale-75 border border-slate-800 shadow-lg"><p className="text-[9px] font-black tracking-widest leading-none">{CREDIT_TEXT}</p></div>
+              </footer>
+            </aside>
+            <main className="flex-1 p-8 flex flex-col items-center justify-start overflow-y-auto scrollbar-hide animate-in zoom-in-95 duration-500 pb-24">
+              <div className="w-full max-w-6xl flex justify-between items-end mb-8 px-4">
+                <div className="space-y-1">
+                  <h2 className="text-2xl font-black text-slate-900 tracking-tight leading-none mb-1 uppercase italic leading-none">Kinesphere 狀態表</h2>
+                  <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full font-black italic">{currentGroup.name}</span>
+                    <span>| {graphTitle}</span>
+                  </div>
+                </div>
+                <div className="flex bg-white p-1.5 rounded-2xl shadow-xl border border-slate-100 gap-1 scale-90 origin-right font-black">
+                  {[
+                    { id: 'ind_session', label: '個人單次', icon: <Target size={14}/> },
+                    { id: 'ind_history', label: '個人全程', icon: <Clock size={14}/> },
+                    { id: 'grp_session', label: '群體單次', icon: <LayoutGrid size={14}/> },
+                    { id: 'grp_history', label: '群體全程', icon: <Globe size={14}/> }
+                  ].map(mode => (
+                    <button key={mode.id} onClick={() => setViewMode(mode.id)} className={`px-4 py-2 rounded-xl text-[11px] flex items-center gap-2 transition-all ${viewMode === mode.id ? 'bg-slate-900 text-white shadow-lg shadow-slate-300' : 'text-slate-400 hover:bg-slate-50'}`}>{mode.icon} {mode.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="bg-white p-12 rounded-[5rem] shadow-2xl border border-white max-w-4xl w-full flex flex-col items-center relative shrink-0 transition-all duration-700">
+                <div className="relative w-[550px] h-[550px] flex items-center justify-center scale-110">
+                  <svg ref={chartRef} viewBox="0 0 300 350" className="w-full h-full drop-shadow-2xl overflow-visible">
+                    <defs>
+                      <radialGradient id="bodySkin" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#cbd5e1" /><stop offset="100%" stopColor="#475569" /></radialGradient>
+                      <clipPath id="circleClip"><circle cx={CX} cy={CY} r="145" /></clipPath>
+                      <mask id="boxExclusionMask"><rect x="0" y="0" width="300" height="350" fill="white" /><circle cx={CX} cy={CY} r="145" fill="black" /></mask>
+                    </defs>
+                    <text x="150" y="18" textAnchor="middle" fontSize="10" fontWeight="900" fill="#6366f1" className="uppercase italic tracking-widest leading-none">{graphTitle}</text>
+                    
+                    <g clipPath="url(#circleClip)">
+                      <circle cx={CX} cy={CY} r="145" fill={reachColors.far} fillOpacity="0.08" />
+                      <circle cx={CX} cy={CY} r="105" fill={reachColors.middle} fillOpacity="0.1" />
+                      <circle cx={CX} cy={CY} r="65" fill={reachColors.near} fillOpacity="0.12" />
+                    </g>
+                    
+                    {/* 最外圈實體 3D 線 */}
+                    <circle cx={CX} cy={CY} r="145" fill="none" stroke="#1e293b" strokeWidth="2.5" opacity="0.4" />
+                    
+                    <g opacity="0.15" stroke="#64748b" strokeWidth="0.8" fill="none" strokeDasharray="4 2"><ellipse cx={CX} cy={CY} rx="145" ry="45" /><ellipse cx={CX} cy={CY} rx="45" ry="145" /></g>
+
+                    <g mask="url(#boxExclusionMask)">{positions.map(pos => <rect key={`back-${pos}`} x={positionConfig[pos].boxX} y={positionConfig[pos].boxY} width={positionConfig[pos].w} height={positionConfig[pos].h} rx="12" fill="white" fillOpacity="0.8" stroke="#cbd5e1" strokeWidth="0.8" />)}</g>
+                    <line x1="150" y1={CY - 145} x2="150" y2={CY + 145} stroke="white" strokeWidth="4" />
+                    <line x1={CX - 145} y1={CY} x2={CX + 145} y2={CY} stroke="white" strokeWidth="4" />
+
+                    {/* 人形剪影：還原 v57.0 美術剪影 */}
+                    <g opacity="0.45" fill="url(#bodySkin)" transform={`translate(0, ${CHART_Y_OFFSET})`}>
+                      <path d="M150 72 C158 72 162 76 162 85 C162 94 158 100 150 100 C142 100 138 94 138 85 C138 76 142 72 150 72 Z" />
+                      <path d="M135 105 C145 102 155 102 165 105 L175 140 C172 160 165 180 158 190 L142 190 C135 180 128 160 125 140 Z" />
+                      <path d="M165 108 L200 60" stroke="url(#bodySkin)" strokeWidth="12" strokeLinecap="round" />
+                      <path d="M200 60 L212 35 C215 32 222 36 218 42 L208 65 Z" />
+                      <path d="M135 108 L115 135" stroke="url(#bodySkin)" strokeWidth="12" strokeLinecap="round" />
+                      <path d="M115 135 L122 155 C124 158 118 162 112 158 L108 140 Z" />
+                      <path d="M158 190 L215 255" stroke="url(#bodySkin)" strokeWidth="15" strokeLinecap="round" />
+                      <path d="M215 255 L230 268 C234 271 225 278 220 272 L208 260 Z" />
+                      <path d="M142 190 L146 258" stroke="url(#bodySkin)" strokeWidth="16" strokeLinecap="round" />
+                      <path d="M146 258 L158 272 C160 275 148 278 142 272 L140 260 Z" />
+                    </g>
+
+                    {/* 動力扇區數據渲染 */}
+                    {positions.map((pos) => {
+                      const baseAngle = positionConfig[pos]?.angle || 0;
+                      if (viewMode === 'ind_session') return renderRadialBar(currentMember?.sessions?.[selectedSession - 1]?.[pos]?.score || 1.0, baseAngle, 0, 25, getMemberColor(currentGroup.members.indexOf(currentMember)), 0.85, currentMember?.id, selectedSession-1);
+                      if (viewMode === 'ind_history') return (currentMember?.sessions || []).map((s, sIdx) => renderRadialBar(s[pos]?.score || 1.0, baseAngle, (sIdx - (sessionCount - 1) / 2) * (60/sessionCount), (60/sessionCount) * 0.85, getSessionColor(sIdx, sessionCount), 0.85, currentMember?.id, sIdx));
+                      if (viewMode === 'grp_session') {
+                        return selectedMemberIds.map((mId) => {
+                          const mObj = currentGroup.members.find(m => m.id === mId);
+                          if (!mObj) return null;
+                          const orderIdx = selectedMemberIds.indexOf(mId);
+                          return renderRadialBar(mObj.sessions?.[selectedSession - 1]?.[pos]?.score, baseAngle, (orderIdx - (selectedMemberIds.length - 1) / 2) * (70/selectedMemberIds.length), (70/selectedMemberIds.length) * 0.85, getMemberColor(currentGroup.members.indexOf(mObj)), 0.8, mId, selectedSession-1);
+                        });
+                      }
+                      if (viewMode === 'grp_history') {
+                        return selectedMemberIds.map((mId) => {
+                          const mObj = currentGroup.members.find(m => m.id === mId);
+                          if (!mObj) return null;
+                          const mOrderIdx = selectedMemberIds.indexOf(mId);
+                          const mCount = selectedMemberIds.length;
+                          return (mObj.sessions || []).map((s, sIdx) => renderRadialBar(s[pos]?.score, baseAngle, (mOrderIdx - (mCount - 1) / 2) * (70/mCount) + (sIdx - (sessionCount - 1) / 2) * (70/mCount/sessionCount), (70/mCount/sessionCount) * 0.9, getMemberColor(currentGroup.members.indexOf(mObj)), 0.4 + (sIdx/sessionCount)*0.5, mId, sIdx));
+                        });
+                      }
+                      return null;
+                    })}
+                    <g opacity="0.25" stroke="#1e293b" strokeWidth="0.6" fill="none" strokeDasharray="3 1.5" pointerEvents="none"><ellipse cx={CX} cy={CY} rx="145" ry="45" /><ellipse cx={CX} cy={CY} rx="45" ry="145" /></g>
+                    {positions.map(pos => (
+                      <g key={`label-${pos}`}>
+                        <circle cx={positionConfig[pos].align === 'start' ? positionConfig[pos].textX - 4 : positionConfig[pos].textX + 4} cy={positionConfig[pos].textY - 3} r="1.5" fill="#475569" />
+                        <text x={positionConfig[pos].textX} y={positionConfig[pos].textY} textAnchor={positionConfig[pos].align} fontSize="9" fontWeight="900" fill="#1e293b" style={{ textTransform: 'uppercase' }}>{pos}</text>
+                      </g>
+                    ))}
+                  </svg>
+                </div>
+                
+                {/* 底部智慧型雙圖例說明 */}
+                <div className="mt-12 grid grid-cols-5 gap-x-4 gap-y-4 w-full max-w-5xl p-8 bg-slate-50 rounded-[3rem] border border-slate-100 shadow-inner">
+                   <div className="col-span-5 flex flex-col gap-1 border-b border-slate-200 pb-3 mb-2">
+                      <div className="flex items-center justify-between">
+                         <span className="text-[11px] font-black uppercase tracking-widest text-slate-700 flex items-center gap-2 leading-none"><Info size={14}/> 
+                            {viewMode === 'ind_history' ? "歷程次數顏色辨識 / Session Legend" : "成員顏色辨識說明 / Clinical Legend"}
+                         </span>
+                         {hoverInfo && <span className="text-[10px] font-black text-white bg-slate-900 px-3 py-1 rounded-full animate-pulse uppercase tracking-tighter">Focus: T{hoverInfo.sIdx+1} - {currentGroup.members.find(m=>m.id===hoverInfo.mId)?.name}</span>}
+                      </div>
+                   </div>
+                   
+                   {viewMode === 'ind_history' ? (
+                     // 個人全程模式：呈現 T1-T10 的次數顏色
+                     Array.from({length: sessionCount}).map((_, idx) => (
+                       <div key={idx} className="flex items-center gap-3">
+                         <div className="w-4 h-4 rounded-full border-2 border-white shadow-sm shrink-0" style={{ backgroundColor: getSessionColor(idx, sessionCount) }}></div>
+                         <span className="text-[13px] font-black text-slate-800 truncate">第 {idx + 1} 次 (T{idx+1})</span>
+                       </div>
+                     ))
+                   ) : (
+                     // 其他模式：呈現成員姓名顏色
+                     (viewMode.includes('grp') ? selectedMemberIds : [activeMemberId]).map(id => {
+                       const m = currentGroup.members.find(item => item.id === id); if (!m) return null;
+                       return (<div key={id} className="flex items-center gap-3"><div className="w-4 h-4 rounded-full border-2 border-white shadow-md shrink-0" style={{ backgroundColor: getMemberColor(currentGroup.members.indexOf(m)) }}></div><span className="text-[13px] font-black text-slate-800 truncate">{m.name}</span></div>);
+                     })
+                   )}
+                </div>
+              </div>
+            </main>
+          </>
+        )}
+      </div>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 18px; width: 18px; border-radius: 50%; background: #1e293b; cursor: pointer; border: 3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        .shadow-r { box-shadow: 5px 0 10px -2px rgba(0,0,0,0.15); }
+      `}} />
+    </div>
+  );
+};
+
+export default App;
+<script></script>
+</body>
+</html>
